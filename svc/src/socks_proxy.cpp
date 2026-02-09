@@ -294,7 +294,7 @@ bool socks_proxy::handle_socks_request__newclient(
     if (packet[0] == 5)  // SOCKS5 only
     {
         const auto nauth = packet[1];
-        if (packet.size() < 2 + nauth)
+        if (packet.size() < 2 + static_cast<std::size_t>(nauth))
             return true;  // incomplete
 
         bool user_pass_auth_supported = false;
