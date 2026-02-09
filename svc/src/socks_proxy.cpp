@@ -229,6 +229,7 @@ void socks_proxy::handle_requests()
 }
 
 
+
 void socks_proxy::handle_socks_request(
     std::shared_ptr<client_t> client,
     socks_packet_t& request)
@@ -236,25 +237,33 @@ void socks_proxy::handle_socks_request(
     const auto client_token = client->token;
     const auto socks_state = client->socks_state;
 
+    // handle CONNECTED state
+    if (socks_state == socks_state_connected)
+    {
+        if (!handle_socks_request__connected(*client, request))
+            goto __close_and_erase_client;
+        return;
+    }
+
+    // handle other states (buffering needed)
+    client->buffer.insert(
+        client->buffer.end(),
+        request.packet.begin(), request.packet.end());
+
     switch (socks_state)
     {
         case socks_state_newclient:
-            if (!handle_socks_request__newclient(*client, request))
+            if (!handle_socks_request__newclient(*client))
                 goto __close_and_erase_client;
             break;
 
         case socks_state_needauth:
-            if (!handle_socks_request__needauth(*client, request))
+            if (!handle_socks_request__needauth(*client))
                 goto __close_and_erase_client;
             break;
 
         case socks_state_needcmd:
-            if (!handle_socks_request__needcmd(*client, request))
-                goto __close_and_erase_client;
-            break;
-
-        case socks_state_connected:
-            if (!handle_socks_request__connected(*client, request))
+            if (!handle_socks_request__needcmd(*client))
                 goto __close_and_erase_client;
             break;
 
@@ -273,15 +282,21 @@ __close_and_erase_client:
 
 
 bool socks_proxy::handle_socks_request__newclient(
-    client_t& client,
-    const socks_packet_t& request)
+    client_t& client)
 {
-    const auto& packet = request.packet;
+    auto& packet = client.buffer;
+
+    // wait for complete packet
+    if (packet.size() < 3)
+        return true;  // incomplete
 
     // favor no_auth method, support user+pass method
-    if (packet.size() >= 3 && packet[0] == 5)  // SOCKS5 only
+    if (packet[0] == 5)  // SOCKS5 only
     {
         const auto nauth = packet[1];
+        if (packet.size() < 2 + nauth)
+            return true;  // incomplete
+
         bool user_pass_auth_supported = false;
 
         for (std::uint8_t idx = 0; idx < nauth; ++idx)
@@ -292,6 +307,7 @@ bool socks_proxy::handle_socks_request__newclient(
             {
                 client.socks_state = socks_state_needcmd;
                 this->send_to_client(client, bytes_t{5, socks_noauth});
+                packet.clear();
                 return true;
             }
             else if (auth_type == socks_auth_userpass)  // user+pass auth
@@ -305,6 +321,7 @@ bool socks_proxy::handle_socks_request__newclient(
             // go for user+pass auth
             client.socks_state = socks_state_needauth;
             this->send_to_client(client, bytes_t{5, socks_auth_userpass});
+            packet.clear();
             return true;
         }
     }
@@ -316,46 +333,49 @@ bool socks_proxy::handle_socks_request__newclient(
 
 
 bool socks_proxy::handle_socks_request__needauth(
-    client_t& client,
-    const socks_packet_t& request)
+    client_t& client)
 {
     // CAUTION: this assumes socks_auth_userpass auth scheme
 
-    const auto& packet = request.packet;
+    auto& packet = client.buffer;
 
-    if (packet[0] == 1 && packet[1] >= 1 && packet.size() >= 5)
+    if (packet.size() < 2)
+        return true;  // incomplete
+
+    if (packet[0] == 1)
     {
         const auto user_len = static_cast<std::size_t>(packet[1]);
 
-        if (packet.size() >= 4 + user_len)
+        if (packet.size() < 2 + user_len + 1)
+            return true;  // incomplete
+
+        const auto pass_len =
+            static_cast<std::size_t>(packet[2 + user_len]);
+
+        if (packet.size() < 3 + user_len + pass_len)
+            return true;  // incomplete
+
         {
-            const auto pass_len =
-                static_cast<std::size_t>(packet[2 + user_len]);
+            const std::string_view user(
+                reinterpret_cast<const char*>(packet.data()) + 2,
+                user_len);
 
-            if (packet.size() == 3 + user_len + pass_len)
-            {
-                const std::string_view user(
-                    reinterpret_cast<const char*>(packet.data()) + 2,
-                    user_len);
+            const std::string_view pass(
+                reinterpret_cast<const char*>(packet.data()) +
+                    2 + user_len + 1,
+                pass_len);
 
-                const std::string_view pass(
-                    reinterpret_cast<const char*>(packet.data()) +
-                        2 + user_len + 1,
-                    pass_len);
+            LOGDEBUG("SOCKS: user [{}], pass [{}]", user, pass);
+            CIX_UNVAR(user);
+            CIX_UNVAR(pass);
 
-                LOGDEBUG("SOCKS: user [{}], pass [{}]", user, pass);
-                CIX_UNVAR(user);
-                CIX_UNVAR(pass);
+            // TODO: check username and password if needed
 
-                // TODO: check username and password if needed
-
-                // auth successful
-                client.socks_state = socks_state_needcmd;
-                this->send_to_client(client, bytes_t{1, 0});
-                return true;
-            }
-
-            assert(0);
+            // auth successful
+            client.socks_state = socks_state_needcmd;
+            this->send_to_client(client, bytes_t{1, 0});
+            packet.clear();
+            return true;
         }
 
         assert(0);
@@ -368,20 +388,21 @@ bool socks_proxy::handle_socks_request__needauth(
 
 
 bool socks_proxy::handle_socks_request__needcmd(
-    client_t& client,
-    const socks_packet_t& request)
+    client_t& client)
 {
-    const auto& packet = request.packet;
+    auto& packet = client.buffer;
     socks_addr_t addr_type = socks_addr_ipv4;  // default to IPv4
-    std::size_t required_min_len = 10;  // 10 bytes for IPv4 CONNECT command
+    std::size_t required_len = 0;  // 10 bytes for IPv4 CONNECT command
     int addr_family = AF_INET;
     char addr_str[256];
     unsigned short remote_port;
     struct addrinfo* ai_remote = nullptr;
     socks_reply_code_t reply_code = socks_reply_general_failure;
 
-    if (packet.size() < 10 ||
-        packet[0] != 5 ||  // SOCKS5 only
+    if (packet.size() < 4)
+        return true;  // incomplete
+
+    if (packet[0] != 5 ||  // SOCKS5 only
         packet[2] != 0)    // reserved value, expected to be null in SOCKS5
     {
         assert(0);
@@ -403,17 +424,20 @@ bool socks_proxy::handle_socks_request__needcmd(
     switch (addr_type)
     {
         case socks_addr_ipv6:
-            required_min_len = 22;
+            required_len = 22;
             addr_family = AF_INET6;
+            
+            if (packet.size() < required_len)
+                return true;  // incomplete
+
             // fall through
 
         case socks_addr_ipv4:
-            if (packet.size() < required_min_len)
-            {
-                assert(0);
-                reply_code = socks_reply_general_failure;
-                goto __send_status;
-            }
+            if (addr_type == socks_addr_ipv4)
+                required_len = 10;
+
+            if (packet.size() < required_len)
+                return true;  // incomplete
 
             if (!wincompat::inet_ntop(
                 addr_family, packet.data() + 4,
@@ -427,15 +451,14 @@ bool socks_proxy::handle_socks_request__needcmd(
 
         case socks_addr_name:
         {
+            if (packet.size() < 5)
+                return true;  // incomplete
+
             const auto name_len = static_cast<std::size_t>(packet[4]);
 
-            required_min_len = 7 + name_len;
-            if (required_min_len <= 7 || packet.size() < required_min_len)
-            {
-                assert(0);
-                reply_code = socks_reply_general_failure;
-                goto __send_status;
-            }
+            required_len = 7 + name_len;
+            if (packet.size() < required_len)
+                return true;  // incomplete
 
             memcpy_s(&addr_str, sizeof(addr_str), packet.data() + 5, name_len);
             addr_str[name_len] = '\0';
@@ -455,8 +478,8 @@ bool socks_proxy::handle_socks_request__needcmd(
     }
 
     remote_port =
-        static_cast<unsigned short>(packet[required_min_len - 2] << 8) |
-        static_cast<unsigned short>(packet[required_min_len - 1]);
+        static_cast<unsigned short>(packet[required_len - 2] << 8) |
+        static_cast<unsigned short>(packet[required_len - 1]);
 
     if (0 != socks_proxy::resolve(
         reinterpret_cast<const char*>(&addr_str), remote_port, &ai_remote))
@@ -482,7 +505,23 @@ bool socks_proxy::handle_socks_request__needcmd(
 
 __send_status:
     if (reply_code == socks_reply_success)
+    {
         client.socks_state = socks_state_connected;
+        
+        // consume packet header
+        packet.erase(packet.begin(), packet.begin() + required_len);
+        
+        // forward remaining data if any (e.g. fast pipelined request)
+        if (!packet.empty())
+        {
+             // send_to_target takes ownership via move, so we move from buffer
+             this->send_to_target(client, std::move(packet));
+        }
+    }
+    else
+    {
+        packet.clear(); // consume anyway
+    }
 
     if (ai_remote)
     {

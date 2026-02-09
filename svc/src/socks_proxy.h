@@ -117,6 +117,7 @@ private:
         SOCKET conn;  // client connection with SOCKS target
         std::string remote_label;
         cix::ticks_t last_activity;
+        bytes_t buffer;
     };
 
 public:
@@ -140,17 +141,15 @@ public:
         std::shared_ptr<client_t> client,
         socks_packet_t& request);
     bool handle_socks_request__newclient(
-        client_t& client,
-        const socks_packet_t& request);
+        client_t& client);
     bool handle_socks_request__needauth(
-        client_t& client,
-        const socks_packet_t& request);
+        client_t& client);
     bool handle_socks_request__needcmd(
-        client_t& client,
-        const socks_packet_t& request);
+        client_t& client);
     bool handle_socks_request__connected(
         const client_t& client,
         socks_packet_t& request);
+
 
     void send_to_client(client_t& client, bytes_t&& packet);
     void send_reply_to_client(
