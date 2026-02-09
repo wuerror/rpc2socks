@@ -625,8 +625,9 @@ void socks_proxy::on_client_output_drained(token_t client_token)
 
 void socks_proxy::send_reply_to_client(
     client_t& client, socks_reply_code_t code, socks_addr_t addr_type)
-
 {
+    CIX_UNVAR(addr_type);
+
     // Default reply: IPv4 0.0.0.0:0
     bytes_t packet{
         5, code, 0, socks_addr_ipv4,
