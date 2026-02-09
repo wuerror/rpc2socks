@@ -15,7 +15,7 @@ def read_text(*path):
     Multiple path components may be passed.
     """
     if isinstance(path, str):
-        path = (path, )
+        path = (path,)
 
     file = os.path.join(os.path.dirname(__file__), *path)
 
@@ -24,8 +24,17 @@ def read_text(*path):
 
 
 def main():
-    readme = read_text("..", "README.rst")
+    try:
+        readme = read_text("..", "README.rst")
+    except FileNotFoundError:
+        # Fallback if building from sdist where README might be at root or missing
+        try:
+            readme = read_text("README.rst")
+        except FileNotFoundError:
+            readme = "rpc2socks"  # Fallback description
+
     metadata = {}
+
     exec(read_text("rpc2socks", "__meta__.py"), metadata)
 
     setuptools.setup(
@@ -38,31 +47,26 @@ def main():
         author_email=metadata["__author_email__"],
         url=metadata["__url__"],
         license=metadata["__license__"],
-
         # https://pypi.org/classifiers/
         classifiers=[
             "Development Status :: 4 - Beta",
             "License :: OSI Approved :: BSD License",
             "Operating System :: OS Independent",
             "Programming Language :: Python",
-            "Programming Language :: Python :: 3"],
-
+            "Programming Language :: Python :: 3",
+        ],
         python_requires=">=3.6",
         zip_safe=True,
-
         packages=["rpc2socks"],
         package_dir={},
         include_package_data=True,
-
-        entry_points={
-            "console_scripts": [
-                "rpc2socks=rpc2socks.cmd.rpc2socks:main"]},
-
+        entry_points={"console_scripts": ["rpc2socks=rpc2socks.cmd.rpc2socks:main"]},
         # rpc2socks implements many workarounds to impacket's issues so it is
         # best to freeze impacket version in order to avoid any potential
         # trouble due to a patch changing lib's behavior
         install_requires=["impacket==0.9.21"],
-        extras_require={})
+        extras_require={},
+    )
 
 
 if __name__ == "__main__":
