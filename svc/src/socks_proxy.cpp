@@ -627,49 +627,37 @@ void socks_proxy::send_reply_to_client(
     client_t& client, socks_reply_code_t code, socks_addr_t addr_type)
 
 {
-    // FIXME: this method does not comply to RFC1928 because it sticks to IPv4
-    // address type with null address and port, regardless of the passed
-    // *addr_type*
-
-#if 0
-    bytes_t packet(22, 0);
-
-    packet[0] = 5;
-    packet[1] = code;
-    // packet[2] = 0;
-    packet[3] = addr_type;
-
-    switch (addr_type)
-    {
-        default:
-            assert(0);
-            // fall through
-
-        case socks_addr_name:
-            // TODO / FIXME: support this case
-            // TODO / FIXME: fill-in ADDR and PORT fields
-            addr_type = socks_addr_ipv4;
-            packet[3] = socks_addr_ipv4;
-            // fall through
-
-        case socks_addr_ipv4:
-            packet.resize(10);
-            // TODO / FIXME: fill-in ADDR and PORT fields
-            break;
-
-        case socks_addr_ipv6:
-            packet.resize(22);
-            // TODO / FIXME: fill-in ADDR and PORT fields
-            break;
-    }
-#else
-    CIX_UNVAR(addr_type);
-
+    // Default reply: IPv4 0.0.0.0:0
     bytes_t packet{
         5, code, 0, socks_addr_ipv4,
         0, 0, 0, 0,  // ipv4 addr
         0, 0};       // port
-#endif
+
+    // If connection successful, try to get the actual bound address to comply with RFC 1928
+    if (code == socks_reply_success && client.conn != INVALID_SOCKET)
+    {
+        sockaddr_storage ss;
+        int len = sizeof(ss);
+
+        if (getsockname(client.conn, reinterpret_cast<sockaddr*>(&ss), &len) == 0)
+        {
+            if (ss.ss_family == AF_INET)
+            {
+                const auto* sin = reinterpret_cast<const sockaddr_in*>(&ss);
+                // packet is already IPv4 sized/typed, just fill values
+                memcpy(&packet[4], &sin->sin_addr, 4);
+                memcpy(&packet[8], &sin->sin_port, 2);
+            }
+            else if (ss.ss_family == AF_INET6)
+            {
+                const auto* sin6 = reinterpret_cast<const sockaddr_in6*>(&ss);
+                packet.resize(22);
+                packet[3] = socks_addr_ipv6;
+                memcpy(&packet[4], &sin6->sin6_addr, 16);
+                memcpy(&packet[20], &sin6->sin6_port, 2);
+            }
+        }
+    }
 
     auto response = std::make_shared<socks_packet_t>(
         client.token, std::move(packet));
