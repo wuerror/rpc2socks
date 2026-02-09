@@ -118,10 +118,17 @@ private:
         std::string remote_label;
         cix::ticks_t last_activity;
         bytes_t buffer;
+
+        // Flow control
+        std::deque<bytes_t> pending_send_buffer;
+        std::size_t pending_send_size;
+        bool is_reading_paused;
+        bool is_sending_to_listener;
     };
 
 public:
     socks_proxy();
+
     ~socks_proxy();
 
     void set_listener(std::shared_ptr<listener_t> listener);
@@ -152,7 +159,9 @@ public:
 
 
     void send_to_client(client_t& client, bytes_t&& packet);
+    void drain_client_buffer(client_t& client);
     void send_reply_to_client(
+
         client_t& client, socks_reply_code_t code, socks_addr_t addr_type);
     bool send_to_target(const client_t& client, bytes_t&& packet);
     std::shared_ptr<client_t> find_client(SOCKET socket) const;
@@ -162,7 +171,11 @@ public:
     void request_close(token_t client_token);
     void notify_disconnected(token_t client_token);
 
+    // Flow control
+    void on_client_output_drained(token_t client_token);
+
     // socketio::listener_t
+
     void on_socketio_recv(SOCKET socket, bytes_t&& packet);
     void on_socketio_disconnected(SOCKET socket);
 

@@ -109,6 +109,34 @@ void socketio::register_socket(SOCKET socket)
 }
 
 
+void socketio::pause_read(SOCKET socket)
+{
+    if (socket == INVALID_SOCKET)
+        return;
+
+    std::scoped_lock lock(m_mutex);
+
+    m_fdset_read.unregister_socket(socket);
+}
+
+
+void socketio::resume_read(SOCKET socket)
+{
+    if (socket == INVALID_SOCKET)
+        return;
+
+    if (GetFileType(reinterpret_cast<HANDLE>(socket)) != FILE_TYPE_PIPE)
+    {
+        assert(0);
+        return;
+    }
+
+    std::scoped_lock lock(m_mutex);
+
+    m_fdset_read.register_socket(socket);
+}
+
+
 bool socketio::send(SOCKET socket, bytes_t&& packet)
 {
     if (socket == INVALID_SOCKET)

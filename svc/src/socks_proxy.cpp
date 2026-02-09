@@ -4,7 +4,15 @@
 #include "main.h"
 
 
+namespace
+{
+    static constexpr std::size_t HIGH_WATER_MARK = 2 * 1024 * 1024;
+    static constexpr std::size_t LOW_WATER_MARK = 512 * 1024;
+}
+
+
 socks_proxy::socks_proxy()
+
     : m_stop_event{nullptr}
     , m_request_event{nullptr}
 {
@@ -116,8 +124,13 @@ socks_proxy::token_t socks_proxy::create_client()
     client->socks_state = socks_state_newclient;
     client->conn = INVALID_SOCKET;
     client->last_activity = now;
+    
+    client->pending_send_size = 0;
+    client->is_reading_paused = false;
+    client->is_sending_to_listener = false;
 
     m_clients[client_token] = client;
+
 
     return client_token;
 }
@@ -554,15 +567,65 @@ bool socks_proxy::handle_socks_request__connected(
 
 void socks_proxy::send_to_client(client_t& client, bytes_t&& packet)
 {
+    // CAUTION: called with m_mutex locked
+
+    client.pending_send_size += packet.size();
+    client.pending_send_buffer.push_back(std::move(packet));
+
+    this->drain_client_buffer(client);
+}
+
+
+void socks_proxy::drain_client_buffer(client_t& client)
+{
+    // CAUTION: called with m_mutex locked
+
+    if (client.is_sending_to_listener)
+        return;
+
+    if (client.pending_send_buffer.empty())
+    {
+        if (client.is_reading_paused && client.pending_send_size < LOW_WATER_MARK)
+        {
+             LOGTRACE("SOCKS client {}: send buffer size {}, resuming read",
+                client.token, client.pending_send_size);
+
+             m_socketio->resume_read(client.conn);
+             client.is_reading_paused = false;
+        }
+
+        return;
+    }
+
+    client.is_sending_to_listener = true;
+
     auto response = std::make_shared<socks_packet_t>(
-        client.token, std::move(packet));
+        client.token, std::move(client.pending_send_buffer.front()));
+    
+    client.pending_send_buffer.pop_front();
+    client.pending_send_size -= response->packet.size();
 
     this->notify_response(response);
 }
 
 
+void socks_proxy::on_client_output_drained(token_t client_token)
+{
+    std::scoped_lock lock(m_mutex);
+
+    auto it = m_clients.find(client_token);
+    if (it != m_clients.end())
+    {
+        auto& client = *it->second;
+        client.is_sending_to_listener = false;
+        this->drain_client_buffer(client);
+    }
+}
+
+
 void socks_proxy::send_reply_to_client(
     client_t& client, socks_reply_code_t code, socks_addr_t addr_type)
+
 {
     // FIXME: this method does not comply to RFC1928 because it sticks to IPv4
     // address type with null address and port, regardless of the passed
@@ -724,19 +787,35 @@ void socks_proxy::on_socketio_recv(SOCKET socket, bytes_t&& packet)
 {
     cix::lock_guard lock(m_mutex);
     auto client = this->find_client(socket);
-    lock.unlock();
 
     if (client)
     {
-        this->send_to_client(*client, std::move(packet));
+        const auto packet_size = packet.size();
+
+        client->pending_send_size += packet_size;
+        client->pending_send_buffer.push_back(std::move(packet));
+
+        if (client->pending_send_size > HIGH_WATER_MARK)
+        {
+            if (!client->is_reading_paused)
+            {
+                LOGTRACE("SOCKS client {}: send buffer size {}, pausing read",
+                    client->token, client->pending_send_size);
+
+                m_socketio->pause_read(socket);
+                client->is_reading_paused = true;
+            }
+        }
+
+        this->drain_client_buffer(*client);
     }
     else
     {
         // proxy client disconnected, so disconnect from SOCKS target
-        lock.lock();
         this->disconnect_socket(socket);
     }
 }
+
 
 
 void socks_proxy::on_socketio_disconnected(SOCKET socket)

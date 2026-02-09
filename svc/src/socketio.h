@@ -50,6 +50,8 @@ public:
 
     void launch();
     void register_socket(SOCKET socket);
+    void pause_read(SOCKET socket);
+    void resume_read(SOCKET socket);
     bool send(SOCKET socket, bytes_t&& packet);
     void disconnect_and_unregister_socket(SOCKET socket);
     void unregister_socket(SOCKET socket);

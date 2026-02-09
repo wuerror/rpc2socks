@@ -865,7 +865,37 @@ void svc_worker::on_namedpipe_sent(
     assert(pipe == m_pipe || !m_pipe);
 
     LOGTRACE("PIPE INSTANCE WROTE {} bytes", packet.size());
+
+    std::vector<socks_proxy::token_t> tokens_to_notify;
+
+    if (output_queue_size < cix::win_namedpipe_server::io_buffer_default_size)
+    {
+        std::scoped_lock lock(m_mutex);
+        
+        auto chan_it = m_channels.find(pipe_instance_token);
+        if (chan_it != m_channels.end())
+        {
+            auto channel = chan_it->second;
+            auto client = this->find_client_by_channel(channel);
+            
+            if (client)
+            {
+                // Notify all associated SOCKS connections that they can send more data
+                tokens_to_notify.reserve(client->socks_id_to_token.size());
+                for (const auto& pair : client->socks_id_to_token)
+                {
+                    tokens_to_notify.push_back(pair.second);
+                }
+            }
+        }
+    }
+
+    for (const auto token : tokens_to_notify)
+    {
+        m_socks_proxy->on_client_output_drained(token);
+    }
 }
+
 
 
 void svc_worker::on_namedpipe_closed(
